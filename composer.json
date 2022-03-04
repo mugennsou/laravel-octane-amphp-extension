@@ -1,0 +1,48 @@
+{
+    "name": "mugennsou/laravel-octane-extension-amphp",
+    "description": "",
+    "license": "MIT",
+    "type": "library",
+    "authors": [
+        {
+            "name": "MA JIAN",
+            "email": "mj501738931@gmail.com"
+        }
+    ],
+    "autoload": {
+        "psr-4": {
+            "Mugennsou\\LaravelOctaneExtension\\": "src"
+        }
+    },
+    "autoload-dev": {
+        "psr-4": {
+            "Mugennsou\\LaravelOctaneExtension\\Tests\\": "tests"
+        }
+    },
+    "config": {
+        "sort-packages": true
+    },
+    "extra": {
+        "laravel": {
+            "providers": [
+                "Mugennsou\\LaravelOctaneExtension\\OctaneExtensionAmphpServiceProvider"
+            ]
+        }
+    },
+    "require": {
+        "php": "^8.1",
+        "ext-posix": "*",
+        "amphp/cluster": "^1.0",
+        "amphp/file": "^2.0",
+        "amphp/http-server": "^2.0",
+        "amphp/http-server-form-parser": "^1.1",
+        "mugennsou/laravel-octane-extension": "dev-master",
+        "spatie/laravel-package-tools": "^1.10"
+    },
+    "require-dev": {
+        "amphp/phpunit-util": "^1.4",
+        "mockery/mockery": "^1.5",
+        "orchestra/testbench": "^6.16 | ^7.0",
+        "pestphp/pest": "^1.21"
+    }
+}
