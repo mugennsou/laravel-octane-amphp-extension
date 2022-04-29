@@ -4,21 +4,24 @@ declare(strict_types=1);
 
 namespace Mugennsou\LaravelOctaneExtension\Console\Commands;
 
+use Amp\Future;
+use Amp\Process\Process;
+use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Str;
 use Laravel\Octane\Commands\Command;
 use Laravel\Octane\Commands\Concerns as OctaneConcerns;
+use Mugennsou\LaravelOctaneExtension\Amphp\FileWatcher;
 use Mugennsou\LaravelOctaneExtension\Amphp\ServerProcessInspector;
 use Mugennsou\LaravelOctaneExtension\Amphp\ServerStateFile;
-use Psr\Log\LogLevel;
-use Symfony\Component\Console\Command\SignalableCommandInterface;
+use Revolt\EventLoop;
 use Symfony\Component\Process\PhpExecutableFinder;
-use Symfony\Component\Process\Process;
 
-use function Amp\Cluster\countCpuCores;
+use function Amp\async;
+use function Amp\delay;
+use function Amp\Future\await;
 
-class StartAmphpCommand extends Command implements SignalableCommandInterface
+class StartAmphpCommand extends Command
 {
-    use OctaneConcerns\InteractsWithServers;
     use OctaneConcerns\InteractsWithEnvironmentVariables;
 
     /**
@@ -47,6 +50,8 @@ class StartAmphpCommand extends Command implements SignalableCommandInterface
      */
     protected $hidden = true;
 
+    protected Process $process;
+
     /**
      * Handle the command.
      *
@@ -66,12 +71,12 @@ class StartAmphpCommand extends Command implements SignalableCommandInterface
 
         $this->forgetEnvironmentVariables();
 
+        $this->writeServerRunningMessage();
+
+        $this->startServerWatcher();
+
         $cwd = base_path('vendor/mugennsou/laravel-octane-extension-amphp/bin');
-        $command = array_merge(
-            [(new PhpExecutableFinder())->find(), base_path('vendor/amphp/cluster/bin/cluster')],
-            $this->clusterOptions(),
-            [$cwd . '/amphp-server.php']
-        );
+        $command = [(new PhpExecutableFinder())->find(), $cwd . '/amphp-server.php'];
         $env = [
             'APP_ENV' => app()->environment(),
             'APP_BASE_PATH' => base_path(),
@@ -79,12 +84,17 @@ class StartAmphpCommand extends Command implements SignalableCommandInterface
             'STATE_FILE' => $serverStateFile->path(),
         ];
 
-        /** @var Process $server */
-        $server = tap(new Process($command, $cwd, $env))->start();
+        while (true) {
+            [$code] = await([$this->runWorker($serverStateFile, $command, $cwd, $env)]);
 
-        $serverStateFile->writeProcessId($server->getPid());
+            if ($code !== SIGUSR1) {
+                $this->stopServer();
 
-        return $this->runServer($server, $inspector, 'amphp');
+                break;
+            }
+        }
+
+        return $code;
     }
 
     /**
@@ -99,9 +109,8 @@ class StartAmphpCommand extends Command implements SignalableCommandInterface
             [
                 'appName' => config('app.name', 'Laravel'),
                 'host' => $this->option('host'),
-                'port' => $this->option('port'),
-                'workers' => $this->workerCount(),
-                'maxRequests' => $this->option('max-requests'),
+                'port' => (int)$this->option('port'),
+                'maxRequests' => (int)$this->option('max-requests'),
                 'publicPath' => public_path(),
                 'storagePath' => storage_path(),
                 'octaneConfig' => config('octane'),
@@ -110,64 +119,111 @@ class StartAmphpCommand extends Command implements SignalableCommandInterface
     }
 
     /**
-     * Get the default amphp cluster server options.
+     * Write the server start "message" to the console.
      *
-     * @return array
+     * @return void
      */
-    protected function clusterOptions(): array
+    protected function writeServerRunningMessage()
     {
-        return [
-            '--name',
-            config('app.name', 'Laravel'),
-            '--workers',
-            $this->workerCount(),
-            '--file',
-            storage_path('logs/amphp.log'),
-            '--log',
-            app()->environment('local') ? LogLevel::INFO : LogLevel::ERROR,
-        ];
+        $this->info('Server running…');
+
+        $this->output->writeln([
+            '',
+            sprintf('  Local: <fg=white;options=bold>http://%s:%s</>', $this->option('host'), $this->option('port')),
+            '',
+            '  <fg=yellow>Press Ctrl+C to stop the server</>',
+            '',
+        ]);
     }
 
     /**
-     * Get the number of workers that should be started.
-     *
-     * @return int
+     * Start the file watcher process for the server.
      */
-    protected function workerCount(): int
+    protected function startServerWatcher(): void
     {
-        return $this->option('workers') === 'auto' ? countCpuCores() : (int)$this->option('workers');
+        if (!$this->option('watch')) {
+            return;
+        }
+
+        $paths = collect(config('octane.watch'))->map(fn($path) => base_path($path))->toArray();
+
+        $watcher = new FileWatcher($paths);
+
+        EventLoop::repeat(
+            2,
+            function () use ($watcher): void {
+                if (isset($this->process) && $this->process->isRunning() && $watcher->checkFilesChange()) {
+                    $this->info('Application change detected. Restarting...');
+
+                    $this->reloadServer();
+                }
+            }
+        );
+    }
+
+    /**
+     * Run a worker with command args.
+     *
+     * @param ServerStateFile $serverStateFile
+     * @param array $command
+     * @param string $cwd
+     * @param array $env
+     * @return Future
+     */
+    protected function runWorker(ServerStateFile $serverStateFile, array $command, string $cwd, array $env): Future
+    {
+        return async(
+            function (ServerStateFile $serverStateFile, array $command, string $cwd, array $env) {
+                $this->process = $process = Process::start($command, $cwd, $env);
+
+                $serverStateFile->writeProcessId($process->getPid());
+
+                while (is_string($output = $process->getStdout()->read())) {
+                    $this->writeServerOutput($output);
+                }
+
+                return $process->join();
+            },
+            $serverStateFile,
+            $command,
+            $cwd,
+            $env
+        );
     }
 
     /**
      * Write the server process output ot the console.
      *
-     * @param Process $server
+     * @param string $output
      * @return void
      */
-    protected function writeServerOutput(Process $server)
+    protected function writeServerOutput(string $output): void
     {
-        [$output, $errorOutput] = $this->getServerOutput($server);
-
         Str::of($output)
-            ->explode("\n")
+            ->explode(PHP_EOL)
             ->filter()
             ->each(
-                function ($output): void {
-                    is_array($stream = json_decode($output, true))
-                        ? $this->handleStream($stream)
-                        : $this->info($output);
-                }
-            );
+                function (string $output): void {
+                    $record = json_decode($output, true);
 
-        Str::of($errorOutput)
-            ->explode("\n")
-            ->filter()
-            ->groupBy(fn($output) => $output)
-            ->each(
-                function ($group): void {
-                    is_array($stream = json_decode($output = $group->first(), true)) && isset($stream['type'])
-                        ? $this->handleStream($stream)
-                        : $this->raw($output);
+                    if (!is_array($record)) {
+                        Log::info($output);
+
+                        return;
+                    }
+
+                    if ($record['message'] === 'request') {
+                        $this->handleStream($record['context']);
+
+                        return;
+                    }
+
+                    call_user_func(
+                        [Log::class, strtolower($record['level_name'])],
+                        $record['message'],
+                        $record['context'],
+                        $record['extra']
+                    );
                 }
             );
     }
@@ -179,6 +235,24 @@ class StartAmphpCommand extends Command implements SignalableCommandInterface
      */
     protected function stopServer(): void
     {
-        $this->callSilent('octane-extension:stop-amphp');
+        if (isset($this->process) && $this->process->isRunning()) {
+            unset($this->process);
+
+            $this->callSilent('octane-extension:stop-amphp');
+        }
+    }
+
+    /**
+     * Reload the server.
+     *
+     * @return void
+     */
+    protected function reloadServer(): void
+    {
+        if (isset($this->process) && $this->process->isRunning()) {
+            unset($this->process);
+
+            $this->callSilent('octane-extension:reload-amphp');
+        }
     }
 }

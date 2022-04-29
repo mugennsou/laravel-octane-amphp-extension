@@ -14,7 +14,7 @@ class OctaneExtensionAmphpServiceProvider extends PackageServiceProvider
 {
     public function configurePackage(Package $package): void
     {
-        $package->name('laravel-octane-amphp-extension')
+        $package->name('laravel-octane-extension-amphp')
             ->hasCommands(
                 [
                     Commands\StartAmphpCommand::class,

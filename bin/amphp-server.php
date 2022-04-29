@@ -2,27 +2,22 @@
 
 declare(strict_types=1);
 
-use Amp\Cluster\Cluster;
-use Amp\Deferred;
-use Amp\Http\Server\FormParser\ParsingMiddleware;
-use Amp\Http\Server\Request;
-use Amp\Http\Server\RequestHandler\CallableRequestHandler;
-use Amp\Http\Server\HttpServer;
-use Amp\Loop;
-use Amp\Promise;
-use Laravel\Octane\ApplicationFactory;
-use Laravel\Octane\RequestContext;
-use Laravel\Octane\Worker;
+use Amp\ByteStream;
+use Amp\Http\Server\DefaultErrorHandler;
+use Amp\Http\Server\SocketHttpServer;
+use Amp\Http\Server\StaticContent\DocumentRoot;
+use Amp\Socket\InternetAddress;
 use Monolog\Logger;
-use Mugennsou\LaravelOctaneExtension\Amphp\AmphpClient;
+use Monolog\Processor\PsrLogMessageProcessor;
+use Mugennsou\LaravelOctaneExtension\Amphp\Handlers\OnStart;
+use Mugennsou\LaravelOctaneExtension\Amphp\Handlers\OnStop;
+use Mugennsou\LaravelOctaneExtension\Amphp\Logger\StreamHandler;
+use Mugennsou\LaravelOctaneExtension\Amphp\RequestHandler;
+use Mugennsou\LaravelOctaneExtension\Amphp\WorkerState;
 
-use function Amp\Http\Server\Middleware\stack;
+use function Amp\trapSignal;
 
-ini_set('display_errors', 'stderr');
-
-$_ENV['APP_RUNNING_IN_CONSOLE'] = false;
-
-$basePath = $_SERVER['APP_BASE_PATH'] ?? $_ENV['APP_BASE_PATH'] ?? null;
+$basePath = require $_SERVER['APP_BASE_PATH'] . '/vendor/laravel/octane/bin/bootstrap.php';
 
 if (!is_string($basePath)) {
     fwrite(STDERR, 'Cannot find application base path.' . PHP_EOL);
@@ -30,45 +25,33 @@ if (!is_string($basePath)) {
     exit(11);
 }
 
-$serverState = json_decode(file_get_contents($serverStateFile = $_SERVER['STATE_FILE']), true)['state'];
+$loggerHandler = (new StreamHandler(ByteStream\getStdout()))->pushProcessor(new PsrLogMessageProcessor());
+$logger = (new Logger('server'))->pushHandler($loggerHandler);
 
-Loop::run(
-    static function () use ($basePath, $serverState): Generator {
-        $sockets = yield [Cluster::listen(sprintf('%s:%s', $serverState['host'], $serverState['port']))];
+$server = new SocketHttpServer($logger);
+$serverState = json_decode(file_get_contents($_SERVER['STATE_FILE']), true)['state'];
 
-        $client = new AmphpClient();
-        $worker = tap(new Worker(new ApplicationFactory($basePath), $client))->boot();
+$workerState = new WorkerState($logger, $server, $serverState);
 
-        $handler = stack(
-            new CallableRequestHandler(
-                static function (Request $request) use ($worker, $client, $serverState): Generator {
-                    $deferred = new Deferred();
+$errorHandler = new DefaultErrorHandler();
+$fileHandler = new DocumentRoot($server, $errorHandler, $serverState['publicPath']);
+$requestHandler = new RequestHandler($errorHandler, $fileHandler, $workerState);
 
-                    $request->setAttribute('content', yield $request->getBody()->buffer());
+$server->onStart((new OnStart($workerState, $basePath))(...));
+$server->onStop((new OnStop($workerState))(...));
 
-                    [$illuminateRequest, $context] = $client->marshalRequest(
-                        new RequestContext(
-                            [
-                                'amphpRequest' => $request,
-                                'amphpDeferred' => $deferred,
-                            ]
-                        )
-                    );
+try {
+    $server->expose(new InternetAddress($serverState['host'], $serverState['port']));
 
-                    $worker->handle($illuminateRequest, $context);
+    $server->start($requestHandler, $errorHandler);
 
-                    return $deferred->promise();
-                }
-            ),
-            new ParsingMiddleware()
-        );
+    $signal = trapSignal([SIGUSR1, SIGINT, SIGTERM]);
 
-        $logger = tap(new Logger('worker-' . Cluster::getId()))->pushHandler(Cluster::createLogHandler());
+    $logger->info(sprintf("Received signal %d, stopping HTTP server", $signal));
 
-        $server = new HttpServer($sockets, $handler, $logger);
+    $server->stop();
 
-        Cluster::onTerminate(fn(): Promise => $server->stop());
-
-        yield $server->start();
-    }
-);
+    exit($signal);
+} catch (Throwable $e) {
+    $logger->error($e->getMessage());
+}

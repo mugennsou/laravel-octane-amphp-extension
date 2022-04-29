@@ -4,15 +4,18 @@ declare(strict_types=1);
 
 namespace Mugennsou\LaravelOctaneExtension\Amphp;
 
-use Amp\ByteStream\InMemoryStream;
-use Amp\ByteStream\InputStreamChain;
-use Amp\Deferred;
+use Amp\ByteStream\Payload;
+use Amp\ByteStream\ReadableStreamChain;
+use Amp\DeferredFuture;
+use Amp\Http\Server\Request;
 use Amp\Http\Server\Response;
 use Amp\Http\Status;
+use Closure;
 use DateTime;
 use Illuminate\Foundation\Application;
 use Illuminate\Http\Request as IlluminateRequest;
 use Laravel\Octane\Contracts\Client;
+use Laravel\Octane\Contracts\ServesStaticFiles;
 use Laravel\Octane\Octane;
 use Laravel\Octane\OctaneResponse;
 use Laravel\Octane\RequestContext;
@@ -21,7 +24,9 @@ use Symfony\Component\HttpFoundation\Response as SymfonyResponse;
 use Symfony\Component\HttpFoundation\StreamedResponse;
 use Throwable;
 
-class AmphpClient implements Client
+use function Amp\Http\Server\StaticContent\removeDotPathSegments;
+
+class AmphpClient implements Client, ServesStaticFiles
 {
     protected const STATUS_CODE_REASONS = [
         419 => 'Page Expired',
@@ -42,7 +47,7 @@ class AmphpClient implements Client
 
     public function respond(RequestContext $context, OctaneResponse $octaneResponse): void
     {
-        /** @var Deferred $amphpDeferred */
+        /** @var DeferredFuture $amphpDeferred */
         $amphpDeferred = $context['amphpDeferred'];
 
         $symfonyResponse = $octaneResponse->response;
@@ -52,28 +57,66 @@ class AmphpClient implements Client
         $response = new Response(
             $statusCode = $symfonyResponse->getStatusCode(),
             $this->prepareHeaderVariables($symfonyResponse),
-            new InputStreamChain(...$streams),
+            new ReadableStreamChain(...$streams),
         );
 
         if (!is_null($reason = $this->getReasonFromStatusCode($statusCode))) {
             $response->setStatus($statusCode, $reason);
         }
 
-        $amphpDeferred->resolve($response);
+        $amphpDeferred->complete($response);
     }
 
     public function error(Throwable $e, Application $app, IlluminateRequest $request, RequestContext $context): void
     {
-        /** @var Deferred $amphpDeferred */
+        /** @var DeferredFuture $amphpDeferred */
         $amphpDeferred = $context['amphpDeferred'];
 
-        $amphpDeferred->resolve(
+        $amphpDeferred->complete(
             new Response(
                 Status::INTERNAL_SERVER_ERROR,
                 ['Status' => '500 Internal Server Error', 'Content-Type' => 'text/plain'],
                 Octane::formatExceptionForClient($e, $app->make('config')->get('app.debug'))
             )
         );
+    }
+
+    public function canServeRequestAsStaticFile(IlluminateRequest $request, RequestContext $context): bool
+    {
+        if (empty($context['publicPath'])) {
+            return false;
+        }
+
+        $path = removeDotPathSegments($request->getPathInfo());
+
+        if ($path === '/') {
+            return false;
+        }
+
+        $publicPath = $context['publicPath'];
+        $pathToFile = $publicPath . $path;
+
+        if (in_array(pathinfo($pathToFile, PATHINFO_EXTENSION), ['php', 'htaccess', 'config'])) {
+            return false;
+        }
+
+        if (!is_file($pathToFile)) {
+            return false;
+        }
+
+        return true;
+    }
+
+    public function serveStaticFile(IlluminateRequest $request, RequestContext $context): void
+    {
+        /**
+         * @var Request $amphpRequest
+         * @var DeferredFuture $deferred
+         * @var Closure $fileHandler
+         */
+        ['amphpRequest' => $amphpRequest, 'amphpDeferred' => $deferred, 'fileHandler' => $fileHandler] = $context;
+
+        $deferred->complete($fileHandler($amphpRequest));
     }
 
     protected function prepareHeaderVariables(SymfonyResponse $symfonyResponse): array
@@ -90,20 +133,20 @@ class AmphpClient implements Client
         $streams = [];
 
         if ($symfonyResponse instanceof BinaryFileResponse) {
-            $streams[] = new InMemoryStream($symfonyResponse->getFile()->getContent());
+            $streams[] = new Payload($symfonyResponse->getFile()->getContent());
 
             return $streams;
         }
 
         if (!is_null($outputBuffer) && strlen($outputBuffer) > 0) {
-            $streams[] = new InMemoryStream($outputBuffer);
+            $streams[] = new Payload($outputBuffer);
         }
 
         if ($symfonyResponse instanceof StreamedResponse) {
             ob_start(
                 static function (string $data) use (&$streams) {
                     if (strlen($data) > 0) {
-                        $streams[] = new InMemoryStream($data);
+                        $streams[] = new Payload($data);
                     }
 
                     return '';
@@ -119,7 +162,7 @@ class AmphpClient implements Client
         }
 
         if (strlen($content = $symfonyResponse->getContent()) > 0) {
-            $streams[] = new InMemoryStream($content);
+            $streams[] = new Payload($content);
         }
 
         return $streams;

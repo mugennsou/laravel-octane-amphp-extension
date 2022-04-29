@@ -5,9 +5,10 @@ declare(strict_types=1);
 namespace Mugennsou\LaravelOctaneExtension\Amphp\Actions;
 
 use Amp\Http\Cookie\RequestCookie;
-use Amp\Http\Server\FormParser\File;
+use Amp\Http\Server\FormParser\BufferedFile;
 use Amp\Http\Server\FormParser\Form;
 use Amp\Http\Server\Request;
+use Amp\Socket\InternetAddress;
 use Illuminate\Http\Request as IlluminateRequest;
 use Symfony\Component\HttpFoundation\File\UploadedFile;
 use Symfony\Component\HttpFoundation\Request as SymfonyRequest;
@@ -23,28 +24,27 @@ class ConvertAmphpRequestToIlluminateRequest
     public function __invoke(Request $request): IlluminateRequest
     {
         /** @var Form $form */
-        $form = $request->getAttribute(Form::class);
+        $form = $request->hasAttribute(Form::class) ? $request->getAttribute(Form::class) : new Form([]);
 
-        if (str_contains($request->getHeader('content-type') ?? '', 'multipart/form-data')) {
-            $content = null;
-            $parameters = $this->prepareRequestParameterVariables($this->buildQuery($form->getValues()));
-        } else {
-            $content = $request->getAttribute('content');
-            $parameters = $this->prepareRequestParameterVariables($content);
-        }
+        $parameters = $this->prepareRequestParameterVariables($this->buildQuery($form->getValues()));
 
         $cookies = $this->prepareCookieVariables(...$request->getCookies());
 
         $files = $this->prepareFileVariables($form->getFiles());
 
+        /** @var InternetAddress $remoteAddress */
+        $remoteAddress = $request->getClient()->getRemoteAddress();
+
         $server = $this->prepareServerVariables(
             [
-                'REMOTE_ADDR' => $request->getClient()->getRemoteAddress()->getHost(),
-                'REMOTE_PORT' => $request->getClient()->getRemoteAddress()->getPort(),
+                'REMOTE_ADDR' => $remoteAddress->getAddress(),
+                'REMOTE_PORT' => $remoteAddress->getPort(),
                 'SERVER_PROTOCOL' => 'HTTP/' . $request->getProtocolVersion(),
             ],
             $request->getHeaders()
         );
+
+        $content = $request->hasAttribute('content') ? $request->getAttribute('content') : null;
 
         $symfonyRequest = SymfonyRequest::create(
             $request->getUri()->__toString(),
@@ -120,6 +120,7 @@ class ConvertAmphpRequestToIlluminateRequest
         $uploadFiles = [];
 
         foreach ($files as $field => $values) {
+            /** @var BufferedFile $file */
             foreach ($values as $file) {
                 $fileHash = spl_object_hash($file);
                 $queries[] = http_build_query([$field => $fileHash]);
@@ -128,9 +129,9 @@ class ConvertAmphpRequestToIlluminateRequest
             }
         }
 
-        parse_str(implode('&', $queries), $results);
+        parse_str(implode('&', $queries), $parsed);
 
-        return $this->replaceUploadFile($results, $uploadFiles);
+        return $this->replaceUploadFile($parsed, $uploadFiles);
     }
 
     /**
@@ -148,13 +149,16 @@ class ConvertAmphpRequestToIlluminateRequest
     /**
      * Convert Amphp File object into Symfony UploadedFile.
      *
-     * @param File $file
+     * @param BufferedFile $file
      * @return UploadedFile
      */
-    protected function convertUploadFile(File $file): UploadedFile
+    protected function convertUploadFile(BufferedFile $file): ?UploadedFile
     {
-        $tempDir = ini_get('upload_tmp_dir') ?: sys_get_temp_dir();
-        $tempFile = tempnam($tempDir, 'amphp.upload.');
+        if ($file->getName() === '' && $file->getContents() === '') {
+            return null;
+        }
+
+        $tempFile = tempnam(ini_get('upload_tmp_dir') ?: sys_get_temp_dir(), 'amphp.upload.');
 
         file_put_contents($tempFile, $file->getContents());
 
@@ -164,21 +168,23 @@ class ConvertAmphpRequestToIlluminateRequest
     /**
      * Replace results object hash symbol with upload files.
      *
-     * @param array $results
+     * @param array $parsed
      * @param array $uploadFiles
      * @return array
      */
-    protected function replaceUploadFile(array $results, array $uploadFiles): array
+    protected function replaceUploadFile(array $parsed, array $uploadFiles): array
     {
-        foreach ($results as &$result) {
+        $results = [];
+
+        foreach ($parsed as $key => $result) {
             if (is_array($result)) {
-                $result = $this->replaceUploadFile($result, $uploadFiles);
+                $results[$key] = $this->replaceUploadFile($result, $uploadFiles);
 
                 continue;
             }
 
-            if (is_string($result)) {
-                $result = $uploadFiles[$result];
+            if (is_string($result) && isset($uploadFiles[$result])) {
+                $results[$key] = $uploadFiles[$result];
             }
         }
 
