@@ -10,12 +10,17 @@ use Throwable;
 
 class FileWatcher
 {
-    protected array $mtime = [];
+    /** @var array<string, int> */
+    protected array $mTime = [];
 
+    /** @var array<string, string> */
     protected array $md5 = [];
 
     protected int $count = 0;
 
+    /**
+     * @param array<string> $paths
+     */
     public function __construct(protected array $paths)
     {
         $this->init();
@@ -26,15 +31,15 @@ class FileWatcher
      *
      * @return bool
      */
-    public function checkFilesChange(): bool
+    public function filesChanged(): bool
     {
         clearstatcache();
 
         $changed = 0;
 
-        foreach ($this->mtime as $filePath => $MTime) {
+        foreach ($this->mTime as $filePath => $mTime) {
             if (is_dir($filePath)) {
-                unset($this->mtime[$filePath], $this->md5[$filePath]);
+                unset($this->mTime[$filePath], $this->md5[$filePath]);
 
                 $changed++;
 
@@ -42,19 +47,19 @@ class FileWatcher
             }
 
             if (!file_exists($filePath)) {
-                unset($this->mtime[$filePath], $this->md5[$filePath]);
+                unset($this->mTime[$filePath], $this->md5[$filePath]);
 
                 $changed++;
 
                 continue;
             }
 
-            $actualMTime = filemtime($filePath);
+            $actualMTime = filemtime($filePath) ?: 0;
 
-            if ($actualMTime !== $MTime) {
-                $this->mtime[$filePath] = $actualMTime;
+            if ($actualMTime !== $mTime) {
+                $this->mTime[$filePath] = $actualMTime;
 
-                $md5 = md5_file($filePath);
+                $md5 = md5_file($filePath) ?: '';
 
                 if ($md5 !== $this->md5[$filePath]) {
                     $this->md5[$filePath] = $md5;
@@ -65,7 +70,7 @@ class FileWatcher
         }
 
         if ($changed === 0) {
-            $this->mtime = $this->md5 = [];
+            $this->mTime = $this->md5 = [];
             [$latestCount, $this->count] = [$this->count, 0];
 
             $this->init();
@@ -79,7 +84,7 @@ class FileWatcher
     /**
      * Register files for change tracking
      */
-    protected function init()
+    protected function init(): void
     {
         try {
             clearstatcache();
@@ -109,8 +114,8 @@ class FileWatcher
                      * @var SplFileInfo $file
                      */
                     foreach ($finder as $filePath => $file) {
-                        $this->mtime[$filePath] = $file->getMTime();
-                        $this->md5[$filePath] = md5_file($filePath);
+                        $this->mTime[$filePath] = $file->getMTime();
+                        $this->md5[$filePath] = md5_file($filePath) ?: '';
 
                         $this->count++;
                     }
@@ -121,8 +126,8 @@ class FileWatcher
                 if (is_file($path)) {
                     $file = new SplFileInfo($path);
 
-                    $this->mtime[$path] = $file->getMTime();
-                    $this->md5[$path] = md5_file($path);
+                    $this->mTime[$path] = $file->getMTime();
+                    $this->md5[$path] = md5_file($path) ?: '';
 
                     $this->count++;
                 }

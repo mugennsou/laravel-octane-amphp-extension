@@ -7,6 +7,7 @@ namespace Mugennsou\LaravelOctaneExtension\Amphp;
 use Amp\ByteStream\BufferException;
 use Amp\ByteStream\StreamException;
 use Amp\DeferredFuture;
+use Amp\Http\Server\ClientException;
 use Amp\Http\Server\ErrorHandler;
 use Amp\Http\Server\FormParser\BufferingParser;
 use Amp\Http\Server\FormParser\Form;
@@ -17,6 +18,7 @@ use Amp\Http\Server\Response;
 use Amp\Http\Server\StaticContent\DocumentRoot;
 use Amp\Http\Status;
 use Laravel\Octane\RequestContext;
+use Laravel\Octane\Worker;
 use Throwable;
 
 use function Amp\Http\Server\FormParser\parseContentBoundary;
@@ -28,6 +30,8 @@ class RequestHandler implements RequestHandlerInterface
     public function __construct(
         protected readonly ErrorHandler $errorHandler,
         protected readonly DocumentRoot $fileHandler,
+        protected readonly Worker $worker,
+        protected readonly AmphpClient $client,
         protected readonly WorkerState $workerState,
     ) {
         $this->parser = new BufferingParser();
@@ -46,19 +50,18 @@ class RequestHandler implements RequestHandlerInterface
 
         $deferred = new DeferredFuture();
 
-        [$illuminateRequest, $context] = $this->workerState->client->marshalRequest(
+        [$illuminateRequest, $context] = $this->client->marshalRequest(
             new RequestContext(
                 [
                     'amphpRequest' => $request,
                     'amphpDeferred' => $deferred,
                     'fileHandler' => $this->fileHandler->handleRequest(...),
                     'publicPath' => $this->workerState->serverState['publicPath'],
-                    'octaneConfig' => $this->workerState->serverState['octaneConfig'],
                 ]
             )
         );
 
-        $this->workerState->worker->handle($illuminateRequest, $context);
+        $this->worker->handle($illuminateRequest, $context);
 
         return $deferred->getFuture()->await();
     }
@@ -67,29 +70,28 @@ class RequestHandler implements RequestHandlerInterface
      * @param Request $request
      * @return void
      *
-     * @throws ParseException
      * @throws BufferException
+     * @throws ClientException
+     * @throws ParseException
      * @throws StreamException
      */
     protected function parseRequestBody(Request $request): void
     {
-        $boundary = parseContentBoundary($request->getHeader('content-type') ?? '');
+        if ($request->getMethod() === 'GET') {
+            return;
+        }
 
+        $boundary = parseContentBoundary($request->getHeader('content-type') ?? '');
         $body = $request->getBody()->buffer();
 
-        switch ($boundary) {
-            case '':
-                $request->setAttribute('content', $body);
-                $request->setAttribute(Form::class, $this->parser->parseUrlEncodedBody($body));
-                break;
-            case null:
-                $request->setAttribute('content', $body);
-                $request->setAttribute(Form::class, new Form([]));
-                break;
-            default:
-                $request->setAttribute('content', null);
-                $request->setAttribute(Form::class, $this->parser->parseMultipartBody($body, $boundary));
-                break;
-        }
+        $request->setAttribute('content', empty($boundary) ? $body : null);
+        $request->setAttribute(
+            Form::class,
+            match ($boundary) {
+                null => new Form([]),
+                '' => $this->parser->parseUrlEncodedBody($body),
+                default => $this->parser->parseMultipartBody($body, $boundary)
+            }
+        );
     }
 }

@@ -13,11 +13,11 @@ use Laravel\Octane\Commands\Concerns as OctaneConcerns;
 use Mugennsou\LaravelOctaneExtension\Amphp\FileWatcher;
 use Mugennsou\LaravelOctaneExtension\Amphp\ServerProcessInspector;
 use Mugennsou\LaravelOctaneExtension\Amphp\ServerStateFile;
+use Psr\Log\LoggerInterface;
 use Revolt\EventLoop;
 use Symfony\Component\Process\PhpExecutableFinder;
 
 use function Amp\async;
-use function Amp\delay;
 use function Amp\Future\await;
 
 class StartAmphpCommand extends Command
@@ -52,6 +52,11 @@ class StartAmphpCommand extends Command
 
     protected Process $process;
 
+    public function __construct(protected readonly LoggerInterface $logger)
+    {
+        parent::__construct();
+    }
+
     /**
      * Handle the command.
      *
@@ -76,7 +81,7 @@ class StartAmphpCommand extends Command
         $this->startServerWatcher();
 
         $cwd = base_path('vendor/mugennsou/laravel-octane-extension-amphp/bin');
-        $command = [(new PhpExecutableFinder())->find(), $cwd . '/amphp-server.php'];
+        $command = [(new PhpExecutableFinder())->find() ?: 'php', $cwd . '/amphp-server.php'];
         $env = [
             'APP_ENV' => app()->environment(),
             'APP_BASE_PATH' => base_path(),
@@ -123,13 +128,18 @@ class StartAmphpCommand extends Command
      *
      * @return void
      */
-    protected function writeServerRunningMessage()
+    protected function writeServerRunningMessage(): void
     {
         $this->info('Server running…');
 
+        /** @var string $host */
+        $host = $this->option('host');
+        /** @var string $port */
+        $port = $this->option('port');
+
         $this->output->writeln([
             '',
-            sprintf('  Local: <fg=white;options=bold>http://%s:%s</>', $this->option('host'), $this->option('port')),
+            sprintf('  Local: <fg=white;options=bold>http://%s:%s</>', $host, $port),
             '',
             '  <fg=yellow>Press Ctrl+C to stop the server</>',
             '',
@@ -145,14 +155,17 @@ class StartAmphpCommand extends Command
             return;
         }
 
-        $paths = collect(config('octane.watch'))->map(fn($path) => base_path($path))->toArray();
+        /** @var array<string> $watchFiles */
+        $watchFiles = config('octane.watch');
+        /** @var array<string> $paths */
+        $paths = collect($watchFiles)->map(fn ($path): string => base_path($path))->toArray();
 
         $watcher = new FileWatcher($paths);
 
         EventLoop::repeat(
             2,
             function () use ($watcher): void {
-                if (isset($this->process) && $this->process->isRunning() && $watcher->checkFilesChange()) {
+                if (isset($this->process) && $this->process->isRunning() && $watcher->filesChanged()) {
                     $this->info('Application change detected. Restarting...');
 
                     $this->reloadServer();
@@ -165,14 +178,15 @@ class StartAmphpCommand extends Command
      * Run a worker with command args.
      *
      * @param ServerStateFile $serverStateFile
-     * @param array $command
+     * @param array<int, string> $command
      * @param string $cwd
-     * @param array $env
-     * @return Future
+     * @param array<string, int|string> $env
+     * @return Future<int>
      */
     protected function runWorker(ServerStateFile $serverStateFile, array $command, string $cwd, array $env): Future
     {
-        return async(
+        /** @var Future<int> $future */
+        $future = async(
             function (ServerStateFile $serverStateFile, array $command, string $cwd, array $env) {
                 $this->process = $process = Process::start($command, $cwd, $env);
 
@@ -189,6 +203,8 @@ class StartAmphpCommand extends Command
             $cwd,
             $env
         );
+
+        return $future;
     }
 
     /**
@@ -207,7 +223,7 @@ class StartAmphpCommand extends Command
                     $record = json_decode($output, true);
 
                     if (!is_array($record)) {
-                        Log::info($output);
+                        $this->logger->info($output);
 
                         return;
                     }
@@ -218,12 +234,9 @@ class StartAmphpCommand extends Command
                         return;
                     }
 
-                    call_user_func(
-                        [Log::class, strtolower($record['level_name'])],
-                        $record['message'],
-                        $record['context'],
-                        $record['extra']
-                    );
+                    if (method_exists($this->logger, $method = strtolower($record['level_name']))) {
+                        $this->logger->{$method}($record['message'], $record['context'], $record['extra']);
+                    }
                 }
             );
     }

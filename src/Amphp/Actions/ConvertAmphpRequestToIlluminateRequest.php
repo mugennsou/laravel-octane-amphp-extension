@@ -10,6 +10,7 @@ use Amp\Http\Server\FormParser\Form;
 use Amp\Http\Server\Request;
 use Amp\Socket\InternetAddress;
 use Illuminate\Http\Request as IlluminateRequest;
+use Illuminate\Support\Str;
 use Symfony\Component\HttpFoundation\File\UploadedFile;
 use Symfony\Component\HttpFoundation\Request as SymfonyRequest;
 
@@ -28,7 +29,7 @@ class ConvertAmphpRequestToIlluminateRequest
 
         $parameters = $this->prepareRequestParameterVariables($this->buildQuery($form->getValues()));
 
-        $cookies = $this->prepareCookieVariables(...$request->getCookies());
+        $cookies = $this->prepareCookieVariables($request->getCookies());
 
         $files = $this->prepareFileVariables($form->getFiles());
 
@@ -44,6 +45,7 @@ class ConvertAmphpRequestToIlluminateRequest
             $request->getHeaders()
         );
 
+        /** @var string|null $content */
         $content = $request->hasAttribute('content') ? $request->getAttribute('content') : null;
 
         $symfonyRequest = SymfonyRequest::create(
@@ -60,29 +62,10 @@ class ConvertAmphpRequestToIlluminateRequest
     }
 
     /**
-     * Build http query from Amphp Form's fields.
-     *
-     * @param array $fields
-     * @return string
-     */
-    protected function buildQuery(array $fields): string
-    {
-        $queries = [];
-
-        foreach ($fields as $field => $values) {
-            foreach ($values as $value) {
-                $queries[] = http_build_query([$field => $value]);
-            }
-        }
-
-        return implode('&', $queries);
-    }
-
-    /**
      * Parse the "parameters" variables form raw content.
      *
      * @param string $content
-     * @return array
+     * @return array<string, string>
      */
     protected function prepareRequestParameterVariables(string $content): array
     {
@@ -94,10 +77,10 @@ class ConvertAmphpRequestToIlluminateRequest
     /**
      * Parse the "cookies" variables.
      *
-     * @param RequestCookie ...$cookies
-     * @return array
+     * @param array<string, RequestCookie> $cookies
+     * @return array<string, string>
      */
-    protected function prepareCookieVariables(RequestCookie ...$cookies): array
+    protected function prepareCookieVariables(array $cookies): array
     {
         return array_reduce(
             $cookies,
@@ -111,8 +94,8 @@ class ConvertAmphpRequestToIlluminateRequest
     /**
      * Parse the "files" variables.
      *
-     * @param array $files
-     * @return array
+     * @param array<string, array<BufferedFile>> $files
+     * @return array<string, UploadedFile|mixed>
      */
     protected function prepareFileVariables(array $files): array
     {
@@ -137,9 +120,9 @@ class ConvertAmphpRequestToIlluminateRequest
     /**
      * Parse the "server" variables and headers into a single array of $_SERVER variables.
      *
-     * @param array $server
-     * @param array $headers
-     * @return array
+     * @param array<string, int|string> $server
+     * @param array<string, array<string>> $headers
+     * @return array<string, int|string>
      */
     protected function prepareServerVariables(array $server, array $headers): array
     {
@@ -147,10 +130,29 @@ class ConvertAmphpRequestToIlluminateRequest
     }
 
     /**
+     * Build http query from Amphp Form's fields.
+     *
+     * @param array<string, array<string>> $fields
+     * @return string
+     */
+    protected function buildQuery(array $fields): string
+    {
+        $queries = [];
+
+        foreach ($fields as $field => $values) {
+            foreach ($values as $value) {
+                $queries[] = http_build_query([$field => $value]);
+            }
+        }
+
+        return implode('&', $queries);
+    }
+
+    /**
      * Convert Amphp File object into Symfony UploadedFile.
      *
      * @param BufferedFile $file
-     * @return UploadedFile
+     * @return UploadedFile|null
      */
     protected function convertUploadFile(BufferedFile $file): ?UploadedFile
     {
@@ -158,7 +160,8 @@ class ConvertAmphpRequestToIlluminateRequest
             return null;
         }
 
-        $tempFile = tempnam(ini_get('upload_tmp_dir') ?: sys_get_temp_dir(), 'amphp.upload.');
+        $tempFile = tempnam(ini_get('upload_tmp_dir') ?: sys_get_temp_dir(), 'amphp.upload.')
+            ?: '/tmp/amphp.upload.' . Str::random();
 
         file_put_contents($tempFile, $file->getContents());
 
@@ -168,9 +171,9 @@ class ConvertAmphpRequestToIlluminateRequest
     /**
      * Replace results object hash symbol with upload files.
      *
-     * @param array $parsed
-     * @param array $uploadFiles
-     * @return array
+     * @param array<string, string|mixed> $parsed
+     * @param array<UploadedFile|null> $uploadFiles
+     * @return array<string, UploadedFile|mixed>
      */
     protected function replaceUploadFile(array $parsed, array $uploadFiles): array
     {
@@ -194,8 +197,8 @@ class ConvertAmphpRequestToIlluminateRequest
     /**
      * Format the given HTTP headers into properly formatted $_SERVER variables.
      *
-     * @param array $headers
-     * @return array
+     * @param array<string, array<string>> $headers
+     * @return array<string, string>
      */
     protected function formatHttpHeadersIntoServerVariables(array $headers): array
     {

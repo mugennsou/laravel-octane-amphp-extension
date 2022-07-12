@@ -12,9 +12,9 @@ final class StreamHandler extends AbstractProcessingHandler
 {
     private WritableStream $sink;
 
-    /** @psalm-suppress ArgumentTypeCoercion */
     public function __construct(WritableStream $sink, string $level = LogLevel::DEBUG, bool $bubble = true)
     {
+        /** @var LogLevel::* $level */
         parent::__construct($level, $bubble);
 
         $this->sink = $sink;

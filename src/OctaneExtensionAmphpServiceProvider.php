@@ -25,12 +25,12 @@ class OctaneExtensionAmphpServiceProvider extends PackageServiceProvider
             );
     }
 
-    public function packageRegistered()
+    public function packageRegistered(): void
     {
         $this->app->bind(
             ServerStateFile::class,
-            fn(Application $app): ServerStateFile => new ServerStateFile(
-                $app['config']->get('octane.state_file', storage_path('logs/octane-server-state.json'))
+            fn (Application $app): ServerStateFile => new ServerStateFile(
+                $app->make('config')->get('octane.state_file', storage_path('logs/octane-server-state.json'))
             )
         );
     }

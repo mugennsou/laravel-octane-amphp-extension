@@ -79,7 +79,14 @@ class AmphpClientTest extends TestCase
 
         $client->respond(
             new RequestContext(['amphpDeferred' => $deferred]),
-            new OctaneResponse(new StreamedResponse(function () { echo 'Hello world!'; }, 200))
+            new OctaneResponse(
+                new StreamedResponse(
+                    function () {
+                        echo 'Hello world!';
+                    },
+                    200
+                )
+            )
         );
 
         $response = $deferred->getFuture()->await();

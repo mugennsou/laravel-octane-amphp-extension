@@ -37,17 +37,24 @@ class AmphpClient implements Client, ServesStaticFiles
         599 => 'Network Connect Timeout Error',
     ];
 
+    /**
+     * @param RequestContext $context
+     * @return array{IlluminateRequest, RequestContext}
+     */
     public function marshalRequest(RequestContext $context): array
     {
+        /** @var Request $request */
+        $request = $context['amphpRequest'];
+
         return [
-            (new Actions\ConvertAmphpRequestToIlluminateRequest())($context['amphpRequest']),
+            (new Actions\ConvertAmphpRequestToIlluminateRequest())($request),
             $context,
         ];
     }
 
     public function respond(RequestContext $context, OctaneResponse $octaneResponse): void
     {
-        /** @var DeferredFuture $amphpDeferred */
+        /** @var DeferredFuture<Response> $amphpDeferred */
         $amphpDeferred = $context['amphpDeferred'];
 
         $symfonyResponse = $octaneResponse->response;
@@ -69,7 +76,7 @@ class AmphpClient implements Client, ServesStaticFiles
 
     public function error(Throwable $e, Application $app, IlluminateRequest $request, RequestContext $context): void
     {
-        /** @var DeferredFuture $amphpDeferred */
+        /** @var DeferredFuture<Response> $amphpDeferred */
         $amphpDeferred = $context['amphpDeferred'];
 
         $amphpDeferred->complete(
@@ -111,7 +118,7 @@ class AmphpClient implements Client, ServesStaticFiles
     {
         /**
          * @var Request $amphpRequest
-         * @var DeferredFuture $deferred
+         * @var DeferredFuture<Response> $deferred
          * @var Closure $fileHandler
          */
         ['amphpRequest' => $amphpRequest, 'amphpDeferred' => $deferred, 'fileHandler' => $fileHandler] = $context;
@@ -119,15 +126,30 @@ class AmphpClient implements Client, ServesStaticFiles
         $deferred->complete($fileHandler($amphpRequest));
     }
 
+    /**
+     * @param SymfonyResponse $symfonyResponse
+     * @return array<string, array<string>>
+     */
     protected function prepareHeaderVariables(SymfonyResponse $symfonyResponse): array
     {
         if (!$symfonyResponse->headers->has('Date')) {
-            $symfonyResponse->setDate(DateTime::createFromFormat('U', time()));
+            /** @var DateTime $datetime */
+            $datetime = DateTime::createFromFormat('U', (string)time());
+
+            $symfonyResponse->setDate($datetime);
         }
 
-        return $symfonyResponse->headers->all();
+        /** @var array<string, array<string>> $headers */
+        $headers = $symfonyResponse->headers->all();
+
+        return $headers;
     }
 
+    /**
+     * @param SymfonyResponse $symfonyResponse
+     * @param string|null $outputBuffer
+     * @return array<int, Payload>
+     */
     protected function prepareStreams(SymfonyResponse $symfonyResponse, ?string $outputBuffer = null): array
     {
         $streams = [];
@@ -161,7 +183,7 @@ class AmphpClient implements Client, ServesStaticFiles
             return $streams;
         }
 
-        if (strlen($content = $symfonyResponse->getContent()) > 0) {
+        if (strlen($content = $symfonyResponse->getContent() ?: '') > 0) {
             $streams[] = new Payload($content);
         }
 

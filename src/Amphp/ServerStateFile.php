@@ -15,16 +15,17 @@ class ServerStateFile
     /**
      * Read the server state from the server state file.
      *
-     * @return array
+     * @return array{masterProcessId: int, state: array<mixed>}
      */
     public function read(): array
     {
+        /** @var array{masterProcessId: int|null, state: array<mixed>|null} $state */
         $state = is_readable($this->path)
-            ? json_decode(file_get_contents($this->path), true)
+            ? (json_decode(file_get_contents($this->path) ?: '', true) ?? [])
             : [];
 
         return [
-            'masterProcessId' => $state['masterProcessId'] ?? null,
+            'masterProcessId' => $state['masterProcessId'] ?? 0,
             'state' => $state['state'] ?? [],
         ];
     }
@@ -50,7 +51,7 @@ class ServerStateFile
     /**
      * Write the given state array to the server state file.
      *
-     * @param array $newState
+     * @param array<string, mixed> $newState
      * @return void
      */
     public function writeState(array $newState): void
