@@ -1,0 +1,62 @@
+name: Linting
+
+on:
+  push:
+    branches: [master]
+
+jobs:
+
+  linting:
+
+    name: PHP code style fix
+
+    runs-on: ubuntu-latest
+
+    env:
+      php-version: 8.1
+
+    steps:
+      - name: Set git to use LF
+        run: |
+          git config --global core.autocrlf false
+          git config --global core.eol lf
+
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Setup PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: ${{ env.php-version }}
+          coverage: none
+
+      - name: Get Composer cache directory
+        id: composer-cache
+        run: echo "::set-output name=dir::$(composer config cache-dir)"
+
+      - name: Cache dependencies
+        uses: actions/cache@v3
+        with:
+          path: ${{ steps.composer-cache.outputs.dir }}
+          key: composer-ubuntu-latest-${{ env.php-version }}-${{ hashFiles('**/composer.*') }}
+          restore-keys: |
+            composer-ubuntu-latest-${{ env.php-version }}-
+            composer-ubuntu-latest-
+            composer-
+
+      - name: Install dependencies
+        uses: nick-invision/retry@v2
+        with:
+          timeout_minutes: 5
+          max_attempts: 5
+          retry_wait_seconds: 30
+          command: composer update --optimize-autoloader --no-interaction --no-progress
+
+      - name: Execute code style fixer
+        run: vendor/bin/php-cs-fixer fix
+
+      - name: Commit changes
+        uses: stefanzweifel/git-auto-commit-action@v4
+        with:
+          commit_message: PHP Linting
+          skip_fetch: true
